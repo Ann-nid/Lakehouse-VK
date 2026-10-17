@@ -1,0 +1,80 @@
+# Локальный Lakehouse: MinIO + PostgreSQL + Lakekeeper + Trino (+ Superset как BI)
+services:
+
+  minio:                      # Объектное хранилище (S3). Сюда физически падают parquet-файлы
+    image: minio/minio:latest
+    container_name: lakehouse-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]   # 9001 - веб-консоль
+    volumes: ["minio-data:/data"]
+
+  minio-init:                 # Одноразово создаёт бакет "lakehouse"
+    image: minio/mc:latest
+    depends_on: [minio]
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set m http://minio:9000 minioadmin minioadmin; do sleep 2; done;
+      mc mb --ignore-existing m/lakehouse; exit 0;"
+
+  db:                         # PostgreSQL: тут Lakekeeper хранит метаданные каталога
+    image: postgres:16
+    container_name: lakehouse-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  lakekeeper-migrate:         # Одноразово создаёт таблицы Lakekeeper в Postgres
+    image: quay.io/lakekeeper/catalog:latest-main
+    restart: "no"
+    command: ["migrate"]
+    environment: &lk-env
+      LAKEKEEPER__PG_ENCRYPTION_KEY: "this-is-a-local-dev-key-change-me"
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://postgres:postgres@db:5432/postgres
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://postgres:postgres@db:5432/postgres
+    depends_on:
+      db: {condition: service_healthy}
+
+  lakekeeper:                 # Iceberg REST Catalog (каталог метаданных таблиц)
+    image: quay.io/lakekeeper/catalog:latest-main
+    container_name: lakekeeper
+    command: ["serve"]
+    environment: *lk-env
+    ports: ["8181:8181"]
+    depends_on:
+      lakekeeper-migrate: {condition: service_completed_successfully}
+
+  trino:                      # SQL-движок
+    image: trinodb/trino:476
+    container_name: trino
+    ports: ["8080:8080"]
+    volumes: ["./trino/catalog:/etc/trino/catalog"]
+    depends_on: [lakekeeper, minio-init]
+
+  superset:                   # BI (часть 2, запускается отдельно: --profile bi)
+    profiles: ["bi"]
+    build: ./superset
+    container_name: lakehouse-superset
+    environment:
+      SUPERSET_SECRET_KEY: "local-dev-secret-key-change-me-0123456789"
+      SUPERSET_CONFIG_PATH: /app/superset_config.py
+    volumes: ["./superset/superset_config.py:/app/superset_config.py"]
+    ports: ["8088:8088"]
+    depends_on: [trino]
+    command: >
+      bash -c "superset db upgrade &&
+      superset fab create-admin --username admin --firstname Admin --lastname Admin --email admin@local.host --password admin &&
+      superset init && /usr/bin/run-server.sh"
+
+volumes:
+  minio-data:
+  pg-data:
