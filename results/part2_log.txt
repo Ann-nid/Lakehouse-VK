@@ -1,0 +1,31 @@
+### SCHEMA EVOLUTION
+>> SELECT count(*) FROM lakehouse.silver.large_order_lines
+   [399]
+>> ALTER TABLE lakehouse.silver.large_order_lines ADD COLUMN note varchar
+>> SELECT orderkey, quantity, note FROM lakehouse.silver.large_order_lines LIMIT 3
+   [1971680, 49.0, None]
+   [1971680, 44.0, None]
+   [1971680, 34.0, None]
+>> ALTER TABLE lakehouse.silver.large_order_lines RENAME COLUMN note TO remark
+>> SELECT orderkey, quantity, remark FROM lakehouse.silver.large_order_lines LIMIT 3
+   [1971680, 34.0, None]
+   [1971680, 49.0, None]
+   [1971680, 44.0, None]
+
+### TIME TRAVEL (откат после 'случайного' удаления)
+>> SELECT snapshot_id, committed_at, operation FROM lakehouse.silver."large_order_lines$snapshots" ORDER BY committed_at
+   [8967979814424129043, '2026-10-18 15:05:11.005 UTC', 'append']
+>> SELECT count(*) FROM lakehouse.silver.large_order_lines
+   [399]
+Запомнили снапшот: 8967979814424129043 строк: 399
+>> DELETE FROM lakehouse.silver.large_order_lines WHERE order_year = 1992
+   [35]
+>> SELECT count(*) FROM lakehouse.silver.large_order_lines
+   [364]
+После удаления строк: 364
+>> SELECT count(*) FROM lakehouse.silver.large_order_lines FOR VERSION AS OF 8967979814424129043
+   [399]
+>> CALL lakehouse.system.rollback_to_snapshot('silver', 'large_order_lines', 8967979814424129043)
+>> SELECT count(*) FROM lakehouse.silver.large_order_lines
+   [399]
+После отката строк: 399 - совпало с исходным: True
